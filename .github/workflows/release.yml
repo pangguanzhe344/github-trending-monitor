@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build project
+        run: npm run build --if-present
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TAG="${{ inputs.version }}"
+          else
+            TAG=${GITHUB_REF#refs/tags/}
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          # Get previous tag
+          PREV_TAG=$(git describe --abbrev=0 --tags ${TAG}^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release"
+            CHANGELOG="Initial release of GitHub Trending Monitor"
+          else
+            echo "Generating changelog from $PREV_TAG to $TAG"
+            CHANGELOG=$(git log ${PREV_TAG}..${TAG} --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.changelog.outputs.tag }}';
+            const changelog = `${{ steps.changelog.outputs.changelog }}`;
+
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Release ${tag}`,
+              body: `## What's Changed\n\n${changelog}\n\n**Full Changelog**: https://github.com/${context.repo.owner}/${context.repo.repo}/compare/${tag}`,
+              draft: false,
+              prerelease: tag.includes('beta') || tag.includes('alpha') || tag.includes('rc')
+            });
+
+            console.log(`Release created: ${release.data.html_url}`);
+
+      - name: Publish to npm (Optional)
+        if: false # Enable if you want to publish to npm
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+          npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
